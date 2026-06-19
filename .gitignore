@@ -1,0 +1,16 @@
+# DB 파일 (로컬 데이터)
+*.db
+*.sqlite
+
+# 업로드 이미지
+uploads/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+
+# OS
+.DS_Store
+Thumbs.db
