@@ -1,16 +1,12 @@
 import streamlit as st
-import sqlite3
+import psycopg2
 import pandas as pd
 import plotly.express as px
 from datetime import date
 from streamlit_paste_button import paste_image_button
-import io, os, uuid, json
+import io, os, json, base64
 
 st.set_page_config(page_title="해외 하도급 단가 관리", page_icon="🌏", layout="wide")
-
-DB_PATH    = os.path.join(os.path.dirname(__file__), "vendor_data.db")
-UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 CURRENCIES = ["KRW", "USD", "JPY", "CNY", "PHP", "VND", "THB", "MYR", "IDR"]
 DOMAINS    = ["제조업", "자율주행", "농축산업", "건설업", "반도체", "기타"]
@@ -23,68 +19,59 @@ UNITS      = ["객체 당", "프레임 당"]
 # DB
 # ──────────────────────────────────────────────
 def get_conn():
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
+    return psycopg2.connect(st.secrets["DATABASE_URL"])
 
 
 def init_db():
     conn = get_conn()
     try:
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS vendors (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cur = conn.cursor()
+        cur.execute('''CREATE TABLE IF NOT EXISTS vendors (
+            id BIGSERIAL PRIMARY KEY,
             name TEXT NOT NULL UNIQUE, country TEXT,
             contact_name TEXT, contact_email TEXT, contact_phone TEXT,
-            notes TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            notes TEXT, created_at TIMESTAMPTZ DEFAULT NOW()
         )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS projects (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cur.execute('''CREATE TABLE IF NOT EXISTS projects (
+            id BIGSERIAL PRIMARY KEY,
             project_name TEXT NOT NULL, domain TEXT,
             epic_url TEXT, task_detail TEXT, sample_image TEXT,
             contract_yn TEXT DEFAULT 'N', contract_status TEXT,
             contract_start_date TEXT, contract_end_date TEXT,
-            contract_number TEXT, contract_amount REAL, drop_reason TEXT, pm TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            contract_number TEXT, contract_amount BIGINT,
+            drop_reason TEXT, pm TEXT, contracted_vendor_id BIGINT,
+            created_at TIMESTAMPTZ DEFAULT NOW()
         )''')
-        # vendor_quotes: 프로젝트 × 업체 = 1개 견적 단위
-        c.execute('''CREATE TABLE IF NOT EXISTS vendor_quotes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_id INTEGER NOT NULL,
-            vendor_id INTEGER,
+        cur.execute('''CREATE TABLE IF NOT EXISTS vendor_quotes (
+            id BIGSERIAL PRIMARY KEY,
+            project_id BIGINT NOT NULL,
+            vendor_id BIGINT,
             notes TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (project_id) REFERENCES projects(id),
-            FOREIGN KEY (vendor_id) REFERENCES vendors(id)
+            created_at TIMESTAMPTZ DEFAULT NOW()
         )''')
-        # project_tasks: 견적 단위에 속하는 TASK
-        c.execute('''CREATE TABLE IF NOT EXISTS project_tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            quote_id INTEGER,
-            project_id INTEGER,
-            vendor_id INTEGER,
+        cur.execute('''CREATE TABLE IF NOT EXISTS project_tasks (
+            id BIGSERIAL PRIMARY KEY,
+            quote_id BIGINT,
+            project_id BIGINT,
+            vendor_id BIGINT,
             task_name TEXT, task_types TEXT,
-            unit_price REAL, currency TEXT DEFAULT 'USD',
-            unit TEXT DEFAULT '건당',
-            quantity REAL DEFAULT 0, total_purchase REAL DEFAULT 0,
+            unit_price BIGINT DEFAULT 0, currency TEXT DEFAULT 'USD',
+            unit TEXT DEFAULT '객체 당',
+            quantity BIGINT DEFAULT 0, total_purchase BIGINT DEFAULT 0,
             reference_date TEXT, notes TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (quote_id) REFERENCES vendor_quotes(id)
+            created_at TIMESTAMPTZ DEFAULT NOW()
         )''')
-
-        for sql in [
-            "ALTER TABLE projects ADD COLUMN sample_image TEXT",
-            "ALTER TABLE projects ADD COLUMN contract_status TEXT",
-            "ALTER TABLE projects ADD COLUMN pm TEXT",
-            "ALTER TABLE projects ADD COLUMN contracted_vendor_id INTEGER",
-            "ALTER TABLE project_tasks ADD COLUMN quote_id INTEGER",
-            "ALTER TABLE project_tasks ADD COLUMN task_name TEXT",
-            "ALTER TABLE project_tasks ADD COLUMN quantity REAL DEFAULT 0",
-            "ALTER TABLE project_tasks ADD COLUMN total_purchase REAL DEFAULT 0",
+        for col_sql in [
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS sample_image TEXT",
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS contract_status TEXT",
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS pm TEXT",
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS contracted_vendor_id BIGINT",
+            "ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS quote_id BIGINT",
+            "ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS task_name TEXT",
+            "ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS quantity BIGINT DEFAULT 0",
+            "ALTER TABLE project_tasks ADD COLUMN IF NOT EXISTS total_purchase BIGINT DEFAULT 0",
         ]:
-            try: c.execute(sql)
-            except sqlite3.OperationalError: pass
-
+            cur.execute(col_sql)
         conn.commit()
     finally:
         conn.close()
@@ -137,7 +124,7 @@ def get_quotes_for_project(project_id):
                    vq.notes AS 견적메모
             FROM vendor_quotes vq
             LEFT JOIN vendors v ON vq.vendor_id = v.id
-            WHERE vq.project_id = ?
+            WHERE vq.project_id = %s
         """, conn, params=(project_id,))
         tasks = pd.read_sql("""
             SELECT pt.quote_id, pt.task_name AS 과업명, pt.task_types AS 과업유형,
@@ -145,7 +132,7 @@ def get_quotes_for_project(project_id):
                    pt.quantity AS 총작업수량, pt.total_purchase AS 총매입액,
                    pt.reference_date AS 기준일, pt.notes AS 비고
             FROM project_tasks pt
-            WHERE pt.project_id = ?
+            WHERE pt.project_id = %s
         """, conn, params=(project_id,))
         return quotes, tasks
     finally: conn.close()
@@ -154,10 +141,12 @@ def get_quotes_for_project(project_id):
 def get_project_total(project_id):
     conn = get_conn()
     try:
-        r = conn.execute(
-            "SELECT COALESCE(SUM(total_purchase),0) FROM project_tasks WHERE project_id=?",
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COALESCE(SUM(total_purchase),0) FROM project_tasks WHERE project_id=%s",
             (project_id,)
-        ).fetchone()
+        )
+        r = cur.fetchone()
         return r[0] if r else 0
     finally: conn.close()
 
@@ -165,13 +154,15 @@ def get_project_total(project_id):
 def get_vendor_total_for_project(project_id, vendor_id):
     conn = get_conn()
     try:
-        r = conn.execute(
+        cur = conn.cursor()
+        cur.execute(
             """SELECT COALESCE(SUM(pt.total_purchase),0)
                FROM project_tasks pt
                JOIN vendor_quotes vq ON pt.quote_id = vq.id
-               WHERE pt.project_id=? AND vq.vendor_id=?""",
+               WHERE pt.project_id=%s AND vq.vendor_id=%s""",
             (project_id, vendor_id)
-        ).fetchone()
+        )
+        r = cur.fetchone()
         return r[0] if r else 0
     finally: conn.close()
 
@@ -351,13 +342,14 @@ elif page == "🏢 업체 관리":
                             else:
                                 conn = get_conn()
                                 try:
-                                    conn.execute("UPDATE vendors SET name=?,country=?,contact_name=?,contact_email=?,contact_phone=?,notes=? WHERE id=?",
+                                    cur = conn.cursor()
+                                    cur.execute("UPDATE vendors SET name=%s,country=%s,contact_name=%s,contact_email=%s,contact_phone=%s,notes=%s WHERE id=%s",
                                                  (nn,nc,nct,ne,np,nno,int(row["id"])))
                                     conn.commit()
                                     st.success(f"'{nn}' 수정 완료")
                                     st.session_state["show_edit_vendor"] = False
                                     st.rerun()
-                                except sqlite3.IntegrityError:
+                                except psycopg2.IntegrityError:
                                     st.error("이미 동일한 업체명이 존재합니다.")
                                 finally: conn.close()
 
@@ -373,10 +365,11 @@ elif page == "🏢 업체 관리":
                 else:
                     conn = get_conn()
                     try:
-                        conn.execute("INSERT INTO vendors (name,country,contact_name,contact_email,contact_phone,notes) VALUES (?,?,?,?,?,?)",
+                        cur = conn.cursor()
+                        cur.execute("INSERT INTO vendors (name,country,contact_name,contact_email,contact_phone,notes) VALUES (%s,%s,%s,%s,%s,%s)",
                                      (name,country,cname,email,phone,notes))
                         conn.commit(); st.success(f"'{name}' 등록 완료"); st.rerun()
-                    except sqlite3.IntegrityError: st.error("이미 동일한 업체명이 존재합니다.")
+                    except psycopg2.IntegrityError: st.error("이미 동일한 업체명이 존재합니다.")
                     finally: conn.close()
 
         st.divider()
@@ -388,11 +381,15 @@ elif page == "🏢 업체 관리":
                 if vtd=="삭제할 업체를 선택하세요": st.warning("업체를 선택해주세요."); st.stop()
                 conn = get_conn()
                 try:
-                    vid = conn.execute("SELECT id FROM vendors WHERE name=?", (vtd,)).fetchone()[0]
-                    cnt = conn.execute("SELECT COUNT(*) FROM project_tasks WHERE vendor_id=?", (vid,)).fetchone()[0]
+                    cur = conn.cursor()
+                    cur.execute("SELECT id FROM vendors WHERE name=%s", (vtd,))
+                    row = cur.fetchone()
+                    vid = row[0]
+                    cur.execute("SELECT COUNT(*) FROM project_tasks WHERE vendor_id=%s", (vid,))
+                    cnt = cur.fetchone()[0]
                     if cnt>0: st.error(f"연결된 TASK {cnt}건이 있어 삭제 불가합니다.")
                     else:
-                        conn.execute("DELETE FROM vendors WHERE id=?", (vid,))
+                        cur.execute("DELETE FROM vendors WHERE id=%s", (vid,))
                         conn.commit(); st.success("삭제 완료"); st.rerun()
                 finally: conn.close()
 
@@ -432,18 +429,25 @@ elif page == "📝 프로젝트 등록":
                         img_list = []
                         if img_f:
                             try:
-                                img_list = json.loads(img_f) if img_f.startswith("[") else [img_f]
+                                img_list = json.loads(img_f) if str(img_f).startswith("[") else [img_f]
                             except Exception:
                                 img_list = [img_f]
-                        img_list = [f for f in img_list if os.path.exists(os.path.join(UPLOAD_DIR, f))]
                         if img_list:
+                            def _show_img(data_uri):
+                                try:
+                                    _, b64data = data_uri.split(",", 1)
+                                    return io.BytesIO(base64.b64decode(b64data))
+                                except Exception:
+                                    return None
                             if len(img_list) == 1:
-                                st.image(os.path.join(UPLOAD_DIR, img_list[0]), use_container_width=True)
+                                _img = _show_img(img_list[0])
+                                if _img: st.image(_img, use_container_width=True)
                             else:
                                 gcols = st.columns(min(len(img_list), 3))
                                 for gi, gf in enumerate(img_list):
+                                    _img = _show_img(gf)
                                     label = "대표" if gi == 0 else f"{gi+1}번째"
-                                    gcols[gi % 3].image(os.path.join(UPLOAD_DIR, gf), caption=label, use_container_width=True)
+                                    if _img: gcols[gi % 3].image(_img, caption=label, use_container_width=True)
                         else:
                             st.markdown("*(이미지 없음)*")
                     with info_col:
@@ -512,9 +516,10 @@ elif page == "📝 프로젝트 등록":
                     if st.button("🗑️ 프로젝트 삭제", key=f"del_proj_{proj['id']}"):
                         conn = get_conn()
                         try:
-                            conn.execute("DELETE FROM project_tasks WHERE project_id=?", (int(proj["id"]),))
-                            conn.execute("DELETE FROM vendor_quotes WHERE project_id=?", (int(proj["id"]),))
-                            conn.execute("DELETE FROM projects WHERE id=?", (int(proj["id"]),))
+                            cur = conn.cursor()
+                            cur.execute("DELETE FROM project_tasks WHERE project_id=%s", (int(proj["id"]),))
+                            cur.execute("DELETE FROM vendor_quotes WHERE project_id=%s", (int(proj["id"]),))
+                            cur.execute("DELETE FROM projects WHERE id=%s", (int(proj["id"]),))
                             conn.commit(); st.success("삭제 완료"); st.rerun()
                         finally: conn.close()
 
@@ -773,7 +778,7 @@ elif page == "📝 프로젝트 등록":
                         st.error("선정 업체를 선택해주세요."); valid=False
 
                 if valid:
-                    # 이미지 저장 (다중 파일 → JSON, 붙여넣기 → 대표 1장)
+                    # 이미지 저장 (base64 인코딩)
                     img_filename = None
                     upls = st.session_state.get("proj_sample_image") or []
                     pst  = st.session_state.get("pasted_image")
@@ -781,16 +786,14 @@ elif page == "📝 프로젝트 등록":
                     saved = []
                     if upls:
                         for f_obj in list(upls)[:5]:
-                            ext = f_obj.name.rsplit(".",1)[-1]
-                            fname = f"{uuid.uuid4().hex}.{ext}"
-                            with open(os.path.join(UPLOAD_DIR, fname),"wb") as f:
-                                f.write(f_obj.getbuffer())
-                            saved.append(fname)
+                            ext = f_obj.name.rsplit(".", 1)[-1].lower()
+                            b64 = base64.b64encode(f_obj.getbuffer()).decode()
+                            saved.append(f"data:image/{ext};base64,{b64}")
                     if not saved and pst:
-                        fname = f"{uuid.uuid4().hex}.png"
-                        pst.save(os.path.join(UPLOAD_DIR, fname), format="PNG")
-                        saved.append(fname)
-
+                        buf = io.BytesIO()
+                        pst.save(buf, format="PNG")
+                        b64 = base64.b64encode(buf.getvalue()).decode()
+                        saved.append(f"data:image/png;base64,{b64}")
                     img_filename = json.dumps(saved) if saved else None
 
                     conn = get_conn()
@@ -798,15 +801,18 @@ elif page == "📝 프로젝트 등록":
                         # 선정 업체 ID 조회
                         contracted_vid = None
                         if cyn=="Y" and contracted_vname != "선택하세요":
-                            vid_row = conn.execute("SELECT id FROM vendors WHERE name=?", (contracted_vname,)).fetchone()
+                            cur = conn.cursor()
+                            cur.execute("SELECT id FROM vendors WHERE name=%s", (contracted_vname,))
+                            vid_row = cur.fetchone()
                             contracted_vid = vid_row[0] if vid_row else None
 
-                        cur = conn.execute(
+                        cur = conn.cursor()
+                        cur.execute(
                             """INSERT INTO projects
                                (project_name,domain,epic_url,task_detail,sample_image,
                                 contract_yn,contract_status,contract_start_date,contract_end_date,
                                 contract_number,contract_amount,drop_reason,pm,contracted_vendor_id)
-                               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
                             (pname, pdom,
                              st.session_state.get("proj_epic_url",""),
                              st.session_state.get("proj_task_detail",""),
@@ -820,22 +826,24 @@ elif page == "📝 프로젝트 등록":
                              contracted_vid,
                             )
                         )
-                        project_id = cur.lastrowid
+                        project_id = cur.fetchone()[0]
 
                         for vd in vendor_data:
-                            vid_row = conn.execute("SELECT id FROM vendors WHERE name=?", (vd["vendor_name"],)).fetchone()
+                            cur2 = conn.cursor()
+                            cur2.execute("SELECT id FROM vendors WHERE name=%s", (vd["vendor_name"],))
+                            vid_row = cur2.fetchone()
                             vid = vid_row[0] if vid_row else None
-                            qcur = conn.execute(
-                                "INSERT INTO vendor_quotes (project_id, vendor_id) VALUES (?,?)",
+                            cur2.execute(
+                                "INSERT INTO vendor_quotes (project_id, vendor_id) VALUES (%s,%s) RETURNING id",
                                 (project_id, vid)
                             )
-                            quote_id = qcur.lastrowid
+                            quote_id = cur2.fetchone()[0]
                             for t in vd["tasks"]:
-                                conn.execute(
+                                cur2.execute(
                                     """INSERT INTO project_tasks
                                        (quote_id,project_id,vendor_id,task_name,task_types,
                                         unit_price,currency,unit,quantity,total_purchase,reference_date,notes)
-                                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                                     (quote_id, project_id, vid,
                                      t["task_name"], t["task_types"], t["unit_price"],
                                      t["currency"], t["unit"], t["quantity"],
@@ -887,10 +895,13 @@ elif page == "📈 단가 분석":
                     except Exception:
                         img_names = [raw_img]
                     if img_names:
-                        rep = os.path.join(UPLOAD_DIR, img_names[0])
-                        if os.path.exists(rep):
+                        try:
+                            _, b64data = img_names[0].split(",", 1)
+                            _rep_bytes = io.BytesIO(base64.b64decode(b64data))
                             ri_col, _ = st.columns([1, 3])
-                            ri_col.image(rep, caption="대표 이미지", use_container_width=True)
+                            ri_col.image(_rep_bytes, caption="대표 이미지", use_container_width=True)
+                        except Exception:
+                            pass
 
             if len(vendors_in_proj)==0:
                 st.info("이 프로젝트에 등록된 업체 견적이 없습니다.")

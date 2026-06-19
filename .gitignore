@@ -2,6 +2,9 @@
 *.db
 *.sqlite
 
+# Streamlit secrets (비밀번호 포함)
+.streamlit/secrets.toml
+
 # 업로드 이미지
 uploads/
 
