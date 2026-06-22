@@ -7,6 +7,10 @@ from streamlit_paste_button import paste_image_button
 import io, os, json, base64
 
 st.set_page_config(page_title="해외 하도급 단가 관리", page_icon="🌏", layout="wide")
+st.markdown("""<style>
+#MainMenu {visibility: hidden;}
+div[data-testid="stStatusWidget"] {visibility: hidden;}
+</style>""", unsafe_allow_html=True)
 
 CURRENCIES = ["KRW", "USD", "JPY", "CNY", "PHP", "VND", "THB", "MYR", "IDR"]
 DOMAINS    = ["제조업", "자율주행", "농축산업", "건설업", "반도체", "기타"]
