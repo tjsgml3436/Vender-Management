@@ -431,7 +431,7 @@ elif page == "📝 프로젝트 등록":
 
                 pm_label = proj.get("pm") or "-"
                 _auto_expand = (scroll_pid is not None and scroll_pid == int(proj["id"]))
-                with st.expander(f"**{proj['project_name']}**  |  {proj['domain']}  |  PM {pm_label}  |  {badge}  |  총매입액 {total_display}  |  {proj['created_at'][:10]}", expanded=_auto_expand):
+                with st.expander(f"**{proj['project_name']}**  |  {proj['domain']}  |  PM {pm_label}  |  {badge}  |  총매입액 {total_display}  |  {str(proj['created_at'])[:10]}", expanded=_auto_expand):
                     img_col, info_col = st.columns([1,3])
                     with img_col:
                         img_f = proj.get("sample_image")
