@@ -325,10 +325,11 @@ if page == "📊 대시보드":
                 st.session_state["nav_to_page"] = "📝 프로젝트 관리"
                 st.session_state["scroll_to_project"] = int(_proj["id"])
                 st.rerun()
-            pc1.write(_proj.get("domain",""))
-            pc2.write(_cyn)
-            pc3.write(_status)
-            pc4.write(str(_proj.get("created_at",""))[:10])
+            _td = '<p style="margin:0;padding-top:7px">'
+            pc1.markdown(f'{_td}{_proj.get("domain","")}</p>', unsafe_allow_html=True)
+            pc2.markdown(f'{_td}{_cyn}</p>', unsafe_allow_html=True)
+            pc3.markdown(f'{_td}{_status}</p>', unsafe_allow_html=True)
+            pc4.markdown(f'{_td}{str(_proj.get("created_at",""))[:10]}</p>', unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════
