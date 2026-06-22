@@ -170,10 +170,19 @@ def get_vendor_total_for_project(project_id, vendor_id):
 # ──────────────────────────────────────────────
 # Excel 내보내기
 # ──────────────────────────────────────────────
+def _strip_tz(df: pd.DataFrame) -> pd.DataFrame:
+    """timezone-aware datetime 컬럼을 naive로 변환 (openpyxl 호환)"""
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            if hasattr(df[col].dt, "tz") and df[col].dt.tz is not None:
+                df[col] = df[col].dt.tz_localize(None)
+    return df
+
+
 def build_excel():
-    projects = get_projects()
-    tasks    = get_all_tasks()
-    vendors  = get_vendors()
+    projects = _strip_tz(get_projects())
+    tasks    = _strip_tz(get_all_tasks())
+    vendors  = _strip_tz(get_vendors())
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         projects.rename(columns={
