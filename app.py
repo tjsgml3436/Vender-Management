@@ -80,18 +80,26 @@ def init_db():
 # ──────────────────────────────────────────────
 # 조회
 # ──────────────────────────────────────────────
+@st.cache_data(ttl=30)
 def get_vendors():
     conn = get_conn()
     try: return pd.read_sql("SELECT * FROM vendors ORDER BY name", conn)
     finally: conn.close()
 
 
+@st.cache_data(ttl=30)
 def get_projects():
     conn = get_conn()
-    try: return pd.read_sql("SELECT * FROM projects ORDER BY created_at DESC", conn)
+    try: return pd.read_sql(
+        """SELECT id, project_name, domain, epic_url, task_detail, sample_image,
+                  contract_yn, contract_status, contract_start_date, contract_end_date,
+                  contract_number, contract_amount, drop_reason, pm, contracted_vendor_id,
+                  created_at
+           FROM projects ORDER BY created_at DESC""", conn)
     finally: conn.close()
 
 
+@st.cache_data(ttl=30)
 def get_all_tasks():
     """전체 TASK (분석용)"""
     conn = get_conn()
@@ -115,6 +123,7 @@ def get_all_tasks():
     finally: conn.close()
 
 
+@st.cache_data(ttl=30)
 def get_quotes_for_project(project_id):
     """프로젝트의 업체별 견적 목록"""
     conn = get_conn()
@@ -138,6 +147,7 @@ def get_quotes_for_project(project_id):
     finally: conn.close()
 
 
+@st.cache_data(ttl=30)
 def get_project_total(project_id):
     conn = get_conn()
     try:
@@ -151,6 +161,7 @@ def get_project_total(project_id):
     finally: conn.close()
 
 
+@st.cache_data(ttl=30)
 def get_vendor_total_for_project(project_id, vendor_id):
     conn = get_conn()
     try:
@@ -218,16 +229,24 @@ if "vendor_count" not in st.session_state:
 if "vtask_count_0" not in st.session_state:
     st.session_state["vtask_count_0"] = 1
 
-_PAGE_OPTIONS = ["📊 대시보드", "🏢 업체 관리", "📝 프로젝트 등록", "📈 단가 분석"]
+_PAGE_OPTIONS = ["📊 대시보드", "🏢 업체 관리", "📝 프로젝트 관리", "📈 단가 분석"]
+
+if "page" not in st.session_state:
+    st.session_state["page"] = "📊 대시보드"
+_nav = st.session_state.pop("nav_to_page", None)
+if _nav and _nav in _PAGE_OPTIONS:
+    st.session_state["page"] = _nav
 
 with st.sidebar:
     st.title("🌏 해외 하도급")
     st.caption("Enterprise Vision Team")
     st.divider()
-    _nav = st.session_state.pop("nav_to_page", None)
-    _default_idx = _PAGE_OPTIONS.index(_nav) if _nav in _PAGE_OPTIONS else 0
-    page = st.radio("메뉴", _PAGE_OPTIONS, index=_default_idx,
-        label_visibility="collapsed")
+    for _opt in _PAGE_OPTIONS:
+        _is_active = st.session_state["page"] == _opt
+        if st.button(_opt, use_container_width=True,
+                     type="primary" if _is_active else "secondary"):
+            st.session_state["page"] = _opt
+            st.rerun()
     st.divider()
     st.download_button(
         label="📥 엑셀 내보내기",
@@ -236,6 +255,8 @@ with st.sidebar:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
+
+page = st.session_state["page"]
 
 
 # ══════════════════════════════════════════════
@@ -301,7 +322,7 @@ if page == "📊 대시보드":
             _status = "🟢 계약" if _cyn=="Y" else ("🔴 Drop" if _cst=="Drop" else "🟡 Holding")
             pc0, pc1, pc2, pc3, pc4 = st.columns([3,2,1,1,2])
             if pc0.button(_proj["project_name"], key=f"dash_nav_{_proj['id']}", use_container_width=True):
-                st.session_state["nav_to_page"] = "📝 프로젝트 등록"
+                st.session_state["nav_to_page"] = "📝 프로젝트 관리"
                 st.session_state["scroll_to_project"] = int(_proj["id"])
                 st.rerun()
             pc1.write(_proj.get("domain",""))
@@ -355,6 +376,7 @@ elif page == "🏢 업체 관리":
                                     cur.execute("UPDATE vendors SET name=%s,country=%s,contact_name=%s,contact_email=%s,contact_phone=%s,notes=%s WHERE id=%s",
                                                  (nn,nc,nct,ne,np,nno,int(row["id"])))
                                     conn.commit()
+                                    st.cache_data.clear()
                                     st.success(f"'{nn}' 수정 완료")
                                     st.session_state["show_edit_vendor"] = False
                                     st.rerun()
@@ -377,7 +399,7 @@ elif page == "🏢 업체 관리":
                         cur = conn.cursor()
                         cur.execute("INSERT INTO vendors (name,country,contact_name,contact_email,contact_phone,notes) VALUES (%s,%s,%s,%s,%s,%s)",
                                      (name,country,cname,email,phone,notes))
-                        conn.commit(); st.success(f"'{name}' 등록 완료"); st.rerun()
+                        conn.commit(); st.cache_data.clear(); st.success(f"'{name}' 등록 완료"); st.rerun()
                     except psycopg2.IntegrityError: st.error("이미 동일한 업체명이 존재합니다.")
                     finally: conn.close()
 
@@ -399,15 +421,15 @@ elif page == "🏢 업체 관리":
                     if cnt>0: st.error(f"연결된 TASK {cnt}건이 있어 삭제 불가합니다.")
                     else:
                         cur.execute("DELETE FROM vendors WHERE id=%s", (vid,))
-                        conn.commit(); st.success("삭제 완료"); st.rerun()
+                        conn.commit(); st.cache_data.clear(); st.success("삭제 완료"); st.rerun()
                 finally: conn.close()
 
 
 # ══════════════════════════════════════════════
 # 3. 프로젝트 등록
 # ══════════════════════════════════════════════
-elif page == "📝 프로젝트 등록":
-    st.title("📝 프로젝트 등록")
+elif page == "📝 프로젝트 관리":
+    st.title("📝 프로젝트 관리")
     tab1, tab2 = st.tabs(["프로젝트 목록", "프로젝트 등록"])
 
     # ── 목록 ──────────────────────────────────
@@ -529,7 +551,7 @@ elif page == "📝 프로젝트 등록":
                             cur.execute("DELETE FROM project_tasks WHERE project_id=%s", (int(proj["id"]),))
                             cur.execute("DELETE FROM vendor_quotes WHERE project_id=%s", (int(proj["id"]),))
                             cur.execute("DELETE FROM projects WHERE id=%s", (int(proj["id"]),))
-                            conn.commit(); st.success("삭제 완료"); st.rerun()
+                            conn.commit(); st.cache_data.clear(); st.success("삭제 완료"); st.rerun()
                         finally: conn.close()
 
     # ── 등록 ──────────────────────────────────
@@ -859,6 +881,7 @@ elif page == "📝 프로젝트 등록":
                                      t["total_purchase"], t["ref_date"], t["notes"])
                                 )
                         conn.commit()
+                        st.cache_data.clear()
                         st.success(f"'{pname}' 저장 완료 (업체 {len(vendor_data)}개, 총 매입액 {int(all_total):,}원)")
                         # 초기화
                         st.session_state["vendor_count"] = 1
