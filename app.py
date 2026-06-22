@@ -544,7 +544,13 @@ elif page == "📝 프로젝트 관리":
                             _fig_p.update_layout(height=320, showlegend=True, margin=dict(t=20))
                             st.plotly_chart(_fig_p, use_container_width=True)
 
-                    if st.button("🗑️ 프로젝트 삭제", key=f"del_proj_{proj['id']}"):
+                    st.markdown("---")
+                    _btn_edit, _btn_del = st.columns([1,1])
+                    if _btn_edit.button("✏️ 프로젝트 수정", key=f"edit_btn_{proj['id']}", use_container_width=True):
+                        _ek = f"edit_proj_{proj['id']}"
+                        st.session_state[_ek] = not st.session_state.get(_ek, False)
+                        st.rerun()
+                    if _btn_del.button("🗑️ 프로젝트 삭제", key=f"del_proj_{proj['id']}", use_container_width=True):
                         conn = get_conn()
                         try:
                             cur = conn.cursor()
@@ -553,6 +559,83 @@ elif page == "📝 프로젝트 관리":
                             cur.execute("DELETE FROM projects WHERE id=%s", (int(proj["id"]),))
                             conn.commit(); st.cache_data.clear(); st.success("삭제 완료"); st.rerun()
                         finally: conn.close()
+
+                    if st.session_state.get(f"edit_proj_{proj['id']}", False):
+                        st.markdown("#### ✏️ 프로젝트 수정")
+                        _vendors_e = get_vendors()
+                        _vlist_e = _vendors_e["name"].tolist() if len(_vendors_e) > 0 else []
+                        with st.form(f"edit_proj_form_{proj['id']}"):
+                            ep1, ep2, ep3 = st.columns(3)
+                            e_name   = ep1.text_input("프로젝트명 *", value=proj.get("project_name") or "")
+                            e_domain = ep2.selectbox("분야 *", DOMAINS,
+                                index=DOMAINS.index(proj["domain"]) if proj.get("domain") in DOMAINS else 0)
+                            e_pm     = ep3.selectbox("담당 PM *", PM_LIST,
+                                index=PM_LIST.index(proj["pm"]) if proj.get("pm") in PM_LIST else 0)
+                            ep4, ep5 = st.columns(2)
+                            e_epic   = ep4.text_input("에픽티켓 URL", value=proj.get("epic_url") or "")
+                            e_detail = ep5.text_area("과업 상세", value=proj.get("task_detail") or "")
+
+                            e_cyn = st.radio("계약 여부", ["N","Y"], horizontal=True,
+                                index=0 if proj.get("contract_yn","N")=="N" else 1,
+                                key=f"e_cyn_{proj['id']}")
+                            e_contracted_vid = None
+                            if e_cyn == "Y":
+                                ea1,ea2 = st.columns(2)
+                                e_cstart = ea1.text_input("계약 시작일", value=proj.get("contract_start_date") or "")
+                                e_cend   = ea2.text_input("계약 종료일", value=proj.get("contract_end_date") or "")
+                                eb1,eb2 = st.columns(2)
+                                e_cnum   = eb1.text_input("계약번호", value=proj.get("contract_number") or "")
+                                e_camt   = eb2.number_input("계약금액 (KRW)", min_value=0, step=1,
+                                    value=int(proj["contract_amount"]) if proj.get("contract_amount") else 0)
+                                _cur_cv  = ""
+                                if proj.get("contracted_vendor_id") and not pd.isna(proj["contracted_vendor_id"]):
+                                    _cv_row = _vendors_e[_vendors_e["id"]==int(proj["contracted_vendor_id"])]
+                                    _cur_cv = _cv_row.iloc[0]["name"] if len(_cv_row) > 0 else ""
+                                e_cv_sel = st.selectbox("선정 업체", ["선택하세요"] + _vlist_e,
+                                    index=(["선택하세요"]+_vlist_e).index(_cur_cv) if _cur_cv in _vlist_e else 0)
+                                e_cst, e_drop = None, None
+                            else:
+                                e_cst  = st.radio("진행 상태", ["Holding","Drop"], horizontal=True,
+                                    index=0 if proj.get("contract_status","Holding")!="Drop" else 1,
+                                    key=f"e_cst_{proj['id']}")
+                                e_drop = st.text_area("Drop 사유", value=proj.get("drop_reason") or "") if e_cst=="Drop" else None
+                                e_cstart = e_cend = e_cnum = e_cv_sel = None
+                                e_camt = 0
+
+                            if st.form_submit_button("💾 저장", type="primary"):
+                                if not e_name:
+                                    st.error("프로젝트명은 필수입니다.")
+                                else:
+                                    conn = get_conn()
+                                    try:
+                                        cur = conn.cursor()
+                                        if e_cyn == "Y" and e_cv_sel and e_cv_sel != "선택하세요":
+                                            cur.execute("SELECT id FROM vendors WHERE name=%s", (e_cv_sel,))
+                                            r = cur.fetchone()
+                                            e_contracted_vid = r[0] if r else None
+                                        cur.execute(
+                                            """UPDATE projects SET
+                                               project_name=%s, domain=%s, pm=%s,
+                                               epic_url=%s, task_detail=%s,
+                                               contract_yn=%s, contract_status=%s,
+                                               contract_start_date=%s, contract_end_date=%s,
+                                               contract_number=%s, contract_amount=%s,
+                                               drop_reason=%s, contracted_vendor_id=%s
+                                               WHERE id=%s""",
+                                            (e_name, e_domain, e_pm,
+                                             e_epic, e_detail,
+                                             e_cyn, e_cst,
+                                             e_cstart, e_cend,
+                                             e_cnum, e_camt if e_cyn=="Y" else None,
+                                             e_drop, e_contracted_vid,
+                                             int(proj["id"]))
+                                        )
+                                        conn.commit()
+                                        st.cache_data.clear()
+                                        st.session_state[f"edit_proj_{proj['id']}"] = False
+                                        st.success(f"'{e_name}' 수정 완료")
+                                        st.rerun()
+                                    finally: conn.close()
 
     # ── 등록 ──────────────────────────────────
     with tab2:
